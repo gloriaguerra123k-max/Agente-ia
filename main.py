@@ -1,122 +1,44 @@
+import asyncio
+from playwright.async_api import async_playwright
 import requests
 
+# Tu Telegram Bot
 BOT_TOKEN = "8736503875:AAFXmcNIudR1xGufKm7YbkZpLPCtLbq9scs"
 CHAT_ID = "8642959008"
 
-def enviar(msg):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+TELEGRAM_URL = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-ligas = [
-    "eng.1", "esp.1", "ger.1", "ita.1", "fra.1",
-    "bra.1", "arg.1", "col.1", "mex.1"
-]
+# Función para enviar mensaje a Telegram
+def send_telegram(message):
+    requests.get(TELEGRAM_URL, params={"chat_id": CHAT_ID, "text": message})
 
-def obtener_eventos():
-    eventos = []
-    for liga in ligas:
-        try:
-            url = f"http://site.api.espn.com/apis/site/v2/sports/soccer/{liga}/scoreboard"
-            r = requests.get(url)
-            data = r.json()
-            for e in data.get("events", []):
-                e["liga"] = liga
-                eventos.append(e)
-        except:
-            pass
-    return eventos
+# Función principal para analizar la página
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        
+        # Cambia esta URL por la de los partidos que quieres leer
+        await page.goto("https://www.flashscore.com/")
+        await page.wait_for_timeout(5000)  # Espera 5 segundos a que cargue la página
+        
+        # Aquí deberías agregar la lógica para leer la página
+        # Esto es un ejemplo básico
+        partidos = await page.query_selector_all(".event__match")  # Cambia según la página
+        mensajes = []
 
-def analizar():
-    eventos = obtener_eventos()
+        for partido in partidos:
+            texto = await partido.inner_text()
+            if "0-0" in texto or "empate" in texto:
+                mensajes.append(f"MUCHOS EMPATES -> apostar siguiente partido:\n{texto}")
+            else:
+                mensajes.append(f"Resultado observado:\n{texto}")
+        
+        # Envía los mensajes a Telegram
+        for msg in mensajes:
+            send_telegram(msg)
 
-    ligas_dict = {}
-
-    # ORGANIZAR POR LIGA
-    for e in eventos:
-        liga = e["liga"]
-
-        comp = e["competitions"][0]
-        equipos = comp["competitors"]
-
-        local = equipos[0]["team"]["name"]
-        visitante = equipos[1]["team"]["name"]
-
-        goles_local = int(equipos[0]["score"])
-        goles_visitante = int(equipos[1]["score"])
-
-        estado = comp["status"]["type"]["description"]
-        minuto_txt = comp["status"].get("displayClock", "0")
-
-        try:
-            minuto = int(minuto_txt.split(":")[0])
-        except:
-            minuto = 0
-
-        partido = {
-            "local": local,
-            "visitante": visitante,
-            "goles_local": goles_local,
-            "goles_visitante": goles_visitante,
-            "minuto": minuto,
-            "estado": estado
-        }
-
-        if liga not in ligas_dict:
-            ligas_dict[liga] = []
-
-        ligas_dict[liga].append(partido)
-
-    alertas = []
-
-    # 🔥 TUS REGLAS
-    for liga, partidos in ligas_dict.items():
-
-        empates = 0
-        no_favoritos_ganando = 0
-
-        for p in partidos:
-
-            # empate
-            if p["goles_local"] == p["goles_visitante"]:
-                empates += 1
-
-            # minuto alto empate
-            if p["goles_local"] == p["goles_visitante"] and p["minuto"] >= 70:
-                alertas.append(
-                    f"🔥 {p['local']} vs {p['visitante']} ({liga}) → POSIBLE GOL MIN {p['minuto']}"
-                )
-
-            # detectar “raro” (simulación no favorito ganando)
-            if p["goles_local"] != p["goles_visitante"]:
-                no_favoritos_ganando += 1
-
-        # regla: muchos empates → siguiente partido
-        if empates >= 2:
-            alertas.append(f"⚽ {liga} → MUCHOS EMPATES → apostar siguiente partido")
-
-        # regla: patrón raro → favorito después
-        if empates >= 1 and no_favoritos_ganando >= 1:
-            alertas.append(f"🔥 {liga} → patrón raro → apostar FAVORITO siguiente")
-
-        # regla: ningún ambos marcan
-        ambos_marcan = 0
-        for p in partidos:
-            if p["goles_local"] > 0 and p["goles_visitante"] > 0:
-                ambos_marcan += 1
-
-        if ambos_marcan == 0 and len(partidos) >= 3:
-            alertas.append(f"💣 {liga} → NADIE marca ambos → PROBABLE AMBOS MARCAN")
-
-    return alertas
-
-def main():
-    alertas = analizar()
-
-    if alertas:
-        for a in alertas:
-            enviar(a)
-    else:
-        enviar("🤖 Sin señales fuertes ahora")
+        await browser.close()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
