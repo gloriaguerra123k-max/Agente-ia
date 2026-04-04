@@ -1,8 +1,8 @@
-name: Agente Futbol
+name: Run Futbol Bot Live
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: '*/5 * * * *'  # cada 5 minutos
   workflow_dispatch:
 
 jobs:
@@ -10,16 +10,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Clonar repo
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
-      - name: Instalar Python
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
-      - name: Instalar requests
-        run: pip install requests
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install
 
-      - name: Ejecutar bot
+      - name: Run bot
         run: python main.py
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
