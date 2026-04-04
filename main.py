@@ -1,8 +1,9 @@
-import time
+import asyncio
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 from telegram import Bot
+from playwright.async_api import async_playwright
 
 # ===============================
 # Configuración del bot Telegram
@@ -12,93 +13,126 @@ CHAT_ID = "8642959008"
 bot = Bot(token=BOT_TOKEN)
 
 # ===============================
-# URLs a revisar
+# Sitios a escanear (dinámicos)
 # ===============================
-sitios = [
+urls = [
     "https://www.flashscore.com/football/",
-    "https://www.soccerway.com/matches/",
+    "https://www.sofascore.com/football",
     "https://www.besoccer.com/live"
 ]
 
 # ===============================
-# Extraer partidos de cada sitio
+# Función para enviar alertas
 # ===============================
-def extraer_partidos(url):
+def enviar_telegram(msg):
     try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        soup = BeautifulSoup(resp.text, "html.parser")
-        
-        partidos = []
-        # Selector genérico, se puede ajustar para cada sitio
-        for match in soup.select(".event__match, .live-match, .match-row"):
-            equipos = match.select(".event__participant, .team-name")
-            equipos_texto = " vs ".join([e.text.strip() for e in equipos]) if equipos else "Desconocido"
-            
-            resultado = match.select_one(".event__scores, .score") 
-            resultado_texto = resultado.text.strip() if resultado else "-"
-            
-            corner = match.select_one(".event__corners")  
-            corner_texto = corner.text.strip() if corner else "0"
-            
-            # Minuto del partido si existe
-            minuto = match.select_one(".event__time, .minute")
-            minuto_num = int(minuto.text.strip().replace("'", "").replace("ET", "0")) if minuto else 0
-
-            partidos.append({
-                "equipos": equipos_texto,
-                "resultado": resultado_texto,
-                "corner": corner_texto,
-                "minuto": minuto_num
-            })
-        return partidos
+        bot.send_message(chat_id=CHAT_ID, text=msg)
+        print("Enviado:", msg)
     except Exception as e:
-        print(f"Error al leer {url}: {e}")
-        return []
+        print("Error Telegram:", e)
 
 # ===============================
-# Aplicar reglas inteligentes
+# Función para parsear partidos
 # ===============================
-def aplicar_reglas(partido):
-    equipos = partido["equipos"]
-    resultado = partido["resultado"]
-    corner = partido["corner"]
-    minuto = partido["minuto"]
-    alerta = ""
+def parsear_partidos(html, site_url):
+    soup = BeautifulSoup(html, "html.parser")
+    partidos = []
 
-    # 1️⃣ Regla: empate 0-0 → ambos marcan probable
-    if resultado == "0-0":
-        alerta = "⚽ Ambos marcan probable (0-0)"
-    
-    # 2️⃣ Regla: varios empates → apostar siguiente favorito
-    if "empate" in resultado.lower():
-        alerta += " | ⚽ Muchos empates → apostar siguiente favorito"
-    
-    # 3️⃣ Regla: favorito va perdiendo + minuto >= 35
-    if "favorito" in equipos.lower() and "va perdiendo" in resultado.lower() and minuto >= 35:
-        alerta += " | ⚽ Apostar al favorito (cuota baja)"
-    
-    # 4️⃣ Info de corners
-    if corner != "0":
-        alerta += f" | Corners: {corner}"
-    
-    return alerta
+    # Genérico: ajusta según sitio
+    for match in soup.select(".event__match, .live-match, .match-row"):
+        equipos = match.select(".event__participant, .team-name")
+        resultado = match.select_one(".event__scores, .score")
+        corner = match.select_one(".event__corners")
+
+        if not equipos or not resultado:
+            continue
+
+        local = equipos[0].text.strip()
+        away = equipos[1].text.strip() if len(equipos) > 1 else "Desconocido"
+        score = resultado.text.strip()
+        corners = corner.text.strip() if corner else "0"
+
+        # Intentar sacar minuto si existe
+        minuto_tag = match.select_one(".event__time")
+        minuto = 0
+        if minuto_tag:
+            txt = minuto_tag.text.strip().replace("ET", "0").replace("'", "")
+            try:
+                minuto = int(txt)
+            except:
+                minuto = 0
+
+        partidos.append({
+            "site": site_url,
+            "local": local,
+            "away": away,
+            "score": score,
+            "minute": minuto,
+            "corners": corners
+        })
+    return partidos
 
 # ===============================
-# Función principal
+# Función para aplicar reglas inteligentes
 # ===============================
-def revisar_partidos():
-    hoy = datetime.today().strftime("%d/%m/%Y")
-    for sitio in sitios:
-        partidos = extraer_partidos(sitio)
-        for partido in partidos:
-            alerta = aplicar_reglas(partido)
-            if alerta:
-                mensaje = f"{partido['equipos']} | {partido['resultado']} | {alerta}"
-                bot.send_message(chat_id=CHAT_ID, text=mensaje)
-                print("Enviado:", mensaje)
+def aplicar_reglas(partidos):
+    alertas = []
+    grupos = {}
+
+    # Agrupar por liga/equipo base (puedes ajustar)
+    for p in partidos:
+        key = p["local"].split(" ")[0]
+        grupos.setdefault(key, []).append(p)
+
+    for group, games in grupos.items():
+        empates = sum(1 for g in games if "0-0" in g["score"])
+        favoritos_ganan = sum(1 for g in games if int(g["score"].split("-")[0]) > int(g["score"].split("-")[1]))
+        no_favoritos_ganan = sum(1 for g in games if int(g["score"].split("-")[1]) > int(g["score"].split("-")[0]))
+
+        # Regla 1: varios empates → apostar siguiente favorito
+        if empates >= 2:
+            alertas.append(f"{group}: ⚽ Varios empates → Apostar al favorito siguiente")
+
+        # Regla 2: nadie marca ambos → probable BTTS
+        if all("0-0" in g["score"] for g in games):
+            alertas.append(f"{group}: ⚽ Nadie marca ambos → Probable BTTS")
+
+        # Regla favorito va perdiendo + minuto > 35
+        for g in games:
+            if g["minute"] >= 35 and int(g["score"].split("-")[0]) < int(g["score"].split("-")[1]):
+                alertas.append(f"{g['local']} vs {g['away']} → ⚽ Favorito va perdiendo minuto {g['minute']} | Corners: {g['corners']}")
+
+    return list(set(alertas))
 
 # ===============================
-# Loop principal
+# Función principal con Playwright
+# ===============================
+async def main():
+    all_partidos = []
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+
+        for url in urls:
+            try:
+                await page.goto(url)
+                await page.wait_for_timeout(8000)  # espera que cargue JS
+                html = await page.content()
+                partidos = parsear_partidos(html, url)
+                all_partidos.extend(partidos)
+            except Exception as e:
+                print("Error cargando:", url, e)
+
+        await browser.close()
+
+    # Aplicar reglas y enviar alertas
+    alertas = aplicar_reglas(all_partidos)
+    for alerta in alertas:
+        enviar_telegram(alerta)
+
+# ===============================
+# Ejecutar
 # ===============================
 if __name__ == "__main__":
-    revisar_partidos()
+    asyncio.run(main())
